@@ -1,0 +1,282 @@
+# =============================================================================
+# ECHO WorkforceOS - Employee Onboarding
+#
+# Consumed by core.planner.engine.PlanningEngine, which topologically sorts the
+# tasks, assigns priorities and groups independent work into parallel tiers.
+# Nothing about this flow is hardcoded in Python: edit this file (or POST a new
+# definition to /api/v1/workflow/templates) and the next run picks it up.
+#
+# Task fields
+#   id                          unique key inside this workflow
+#   name                        human readable label shown in the UI
+#   description                 shown in the workflow canvas tooltip
+#   agent                       registered agent name (AgentRegistry)
+#   tool                        execution plugin name (ToolRegistry)
+#   stage                       coarse phase used for progress reporting
+#   depends_on                  list of task ids that must complete first
+#   priority                    optional manual override (higher runs first)
+#   requires_approval           pauses the workflow for a human decision
+#   approval_role               role permitted to resolve the approval
+#   approval_condition          only gate when this evaluates true:
+#                                 always | verification_not_passed | never
+#   estimated_duration_seconds  used for critical path estimation
+#   retry_policy.max_retries    per-task retry budget
+#   on_failure                  retry | escalate | skip | fail_workflow
+#   input                       static payload merged into the task input
+# =============================================================================
+
+id: employee_onboarding
+name: Employee Onboarding
+description: >-
+  End-to-end autonomous onboarding: verify the employee profile and documents,
+  run compliance policy, obtain human approval only when the checks are not
+  clean, provision every downstream system in parallel, then activate.
+version: "1.0.0"
+entry_event: EmployeeDocumentsSubmitted
+
+# Documents the planner expects to exist before the run can be considered ready.
+# The authoritative, department-aware list lives in config/rules.yaml.
+required_documents:
+  - Offer Letter
+  - I-9 Form
+
+stages:
+  - key: verification
+    label: Verification
+  - key: compliance
+    label: Compliance
+  - key: provisioning
+    label: Provisioning
+  - key: monitoring
+    label: Monitoring
+  - key: activation
+    label: Activation
+
+tasks:
+  # ---------------------------------------------------------------------
+  # Tier 0 - verification, runs in parallel
+  # ---------------------------------------------------------------------
+  - id: verify_profile
+    name: Verify Employee Profile
+    description: Check every required profile field for the department and role.
+    agent: VerificationAgent
+    stage: verification
+    depends_on: []
+    estimated_duration_seconds: 5
+    retry_policy:
+      max_retries: 2
+    on_failure: escalate
+    required_inputs: [employee]
+    expected_outputs: [profile_valid, missing_fields]
+    input:
+      scope: profile
+
+  - id: verify_documents
+    name: Verify Uploaded Documents
+    description: Confirm every required document is present, readable and unexpired.
+    agent: VerificationAgent
+    stage: verification
+    depends_on: []
+    estimated_duration_seconds: 8
+    retry_policy:
+      max_retries: 2
+    on_failure: escalate
+    required_inputs: [documents]
+    expected_outputs: [missing_documents, invalid_documents]
+    input:
+      scope: documents
+
+  # ---------------------------------------------------------------------
+  # Tier 1 - compliance synthesis
+  # ---------------------------------------------------------------------
+  - id: compliance_check
+    name: Run Compliance Rules
+    description: Apply global, department and role policies from config/rules.yaml.
+    agent: VerificationAgent
+    stage: compliance
+    depends_on: [verify_profile, verify_documents]
+    estimated_duration_seconds: 6
+    retry_policy:
+      max_retries: 2
+    on_failure: escalate
+    expected_outputs: [verification_report]
+    input:
+      scope: full
+
+  # ---------------------------------------------------------------------
+  # Tier 2 - human gate, only when the machine is not confident
+  # ---------------------------------------------------------------------
+  - id: compliance_approval
+    name: Compliance Approval
+    description: >-
+      Human sign-off. Skipped automatically when verification passes cleanly,
+      so a clean candidate is onboarded with zero human involvement.
+    agent: ManagerAgent
+    stage: compliance
+    depends_on: [compliance_check]
+    requires_approval: true
+    approval_condition: verification_not_passed
+    approval_role: hr
+    estimated_duration_seconds: 30
+    retry_policy:
+      max_retries: 1
+    on_failure: escalate
+    expected_outputs: [approved, reviewer]
+
+  # ---------------------------------------------------------------------
+  # Tier 3 - provisioning fan-out, all six run concurrently
+  # ---------------------------------------------------------------------
+  - id: create_identity
+    name: Create Corporate Identity
+    description: Allocate the corporate account, employee number and group memberships.
+    agent: ExecutionAgent
+    tool: identity
+    stage: provisioning
+    depends_on: [compliance_approval]
+    estimated_duration_seconds: 10
+    retry_policy:
+      max_retries: 3
+    on_failure: retry
+    expected_outputs: [account_id, corporate_email]
+    input:
+      action: create_account
+
+  - id: provision_workspace
+    name: Provision Workspace Access
+    description: Grant access to the shared drive and create the personal document space.
+    agent: ExecutionAgent
+    tool: storage
+    stage: provisioning
+    depends_on: [compliance_approval]
+    estimated_duration_seconds: 8
+    retry_policy:
+      max_retries: 3
+    on_failure: retry
+    expected_outputs: [workspace_url]
+    input:
+      action: provision_workspace
+
+  - id: create_it_ticket
+    name: Raise IT Equipment Ticket
+    description: Open the hardware and software provisioning ticket for the IT team.
+    agent: ExecutionAgent
+    tool: jira
+    stage: provisioning
+    depends_on: [compliance_approval]
+    estimated_duration_seconds: 7
+    retry_policy:
+      max_retries: 3
+    on_failure: retry
+    expected_outputs: [ticket_key]
+    input:
+      action: create_issue
+      issue_type: Task
+      summary_template: "Onboarding equipment for {employee_name}"
+
+  - id: invite_to_slack
+    name: Invite to Team Channels
+    description: Announce the new joiner and add them to their department channels.
+    agent: ExecutionAgent
+    tool: slack
+    stage: provisioning
+    depends_on: [compliance_approval]
+    estimated_duration_seconds: 5
+    retry_policy:
+      max_retries: 2
+    on_failure: skip
+    expected_outputs: [channel, message_ts]
+    input:
+      action: post_message
+
+  - id: schedule_orientation
+    name: Schedule Orientation
+    description: Book the day-one orientation session with HR on the shared calendar.
+    agent: ExecutionAgent
+    tool: calendar
+    stage: provisioning
+    depends_on: [compliance_approval]
+    estimated_duration_seconds: 9
+    retry_policy:
+      max_retries: 2
+    on_failure: skip
+    expected_outputs: [event_id, event_link]
+    input:
+      action: create_event
+      summary_template: "Orientation - {employee_name}"
+      duration_minutes: 60
+
+  - id: send_welcome_email
+    name: Send Welcome Email
+    description: Deliver the welcome pack with credentials and first-day logistics.
+    agent: ExecutionAgent
+    tool: email
+    stage: provisioning
+    depends_on: [compliance_approval]
+    estimated_duration_seconds: 4
+    retry_policy:
+      max_retries: 3
+    on_failure: retry
+    expected_outputs: [message_id]
+    input:
+      action: send
+      template: welcome
+
+  # ---------------------------------------------------------------------
+  # Tier 4 - monitoring gate over the whole fan-out
+  # ---------------------------------------------------------------------
+  - id: provisioning_health_check
+    name: Verify Provisioning Health
+    description: >-
+      Inspect every provisioning task, retry recoverable failures and escalate
+      anything still broken before the employee is switched on.
+    agent: MonitoringAgent
+    stage: monitoring
+    depends_on:
+      - create_identity
+      - provision_workspace
+      - create_it_ticket
+      - invite_to_slack
+      - schedule_orientation
+      - send_welcome_email
+    estimated_duration_seconds: 6
+    retry_policy:
+      max_retries: 2
+    on_failure: escalate
+    expected_outputs: [healthy, issues_found, recovered]
+    input:
+      action: health_check
+
+  # ---------------------------------------------------------------------
+  # Tier 5 - activation
+  # ---------------------------------------------------------------------
+  - id: activate_employee
+    name: Activate Employee
+    description: Flip the employee to Active and open up all provisioned systems.
+    agent: ExecutionAgent
+    tool: identity
+    stage: activation
+    depends_on: [provisioning_health_check]
+    estimated_duration_seconds: 4
+    retry_policy:
+      max_retries: 3
+    on_failure: escalate
+    expected_outputs: [status]
+    input:
+      action: activate_account
+
+  # ---------------------------------------------------------------------
+  # Tier 6 - closing confirmation
+  # ---------------------------------------------------------------------
+  - id: confirm_completion
+    name: Confirm Onboarding Complete
+    description: Final audit sweep, completion notification and workflow closure.
+    agent: MonitoringAgent
+    stage: activation
+    depends_on: [activate_employee]
+    estimated_duration_seconds: 3
+    retry_policy:
+      max_retries: 1
+    on_failure: escalate
+    expected_outputs: [completed]
+    input:
+      action: confirm_completion

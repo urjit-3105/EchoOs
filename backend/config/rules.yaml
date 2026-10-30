@@ -1,0 +1,24 @@
+policies:
+  global:
+    required_documents:
+      - "Offer Letter"
+      - "I-9 Form"
+    required_profile_fields:
+      - "first_name"
+      - "last_name"
+      - "email"
+      - "department"
+      - "role"
+  
+  departments:
+    Engineering:
+      required_documents:
+        - "Non-Disclosure Agreement (NDA)"
+        - "Invention Assignment Agreement"
+    Sales:
+      required_documents:
+        - "Commission Agreement"
+
+  roles:
+    Manager:
+      requires_background_check: true

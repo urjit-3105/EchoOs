@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment & secrets (never commit secrets)
+.env*
+!.env.example
+
+# Next.js build
+.next/
+frontend/.next/
+out/
+build/
+dist/
+
+# SQLite & databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# IDE & OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Testing & Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
